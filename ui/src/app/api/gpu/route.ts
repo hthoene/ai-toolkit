@@ -113,57 +113,45 @@ async function getGpuStats(isWindows: boolean) {
 }
 
 async function getAMDGpuStats(isWindows: boolean) {
-  const command = 'rocm-smi static --json && echo ";" && rocm-smi metric --json';
-  const { stdout } = await execAsync(command, {
-    env: { ...process.env },
-  });
+  const command = `rocm-smi --showname --showhw --showmeminfo vram --showpower --showtemp --showclocks --showfan --json`;
+  const { stdout } = await execAsync(command);
   
-  const data = stdout.trim().split(';');
-  if (data.length < 2) return [];
-
-  let sdata: any = {}, mdata: any = {};
+  let data: any;
   try {
-    sdata = JSON.parse(data[0]);
-    mdata = JSON.parse(data[1]);
+    data = JSON.parse(stdout);
   } catch (error) {
     console.error('Failed to parse rocm-smi JSON:', error);
     return [];
   }
 
-  // ROCm
-  const staticGpus = Array.isArray(sdata.gpu_data) ? sdata.gpu_data : (Array.isArray(sdata) ? sdata : []);
-  const metricGpus = Array.isArray(mdata.gpu_data) ? mdata.gpu_data : (Array.isArray(mdata) ? mdata : []);
-
-  return staticGpus.map((d: any, index: number) => {
-    const i = amdParseInt(d.gpu || index);
-    const gpu_data = metricGpus[i] || {};
-    
-    const mem_total = amdParseFloat(gpu_data.mem_usage?.total_vram?.value || 0);
-    const mem_used = amdParseFloat(gpu_data.mem_usage?.used_vram?.value || 0);
-    const mem_free = amdParseFloat(gpu_data.mem_usage?.free_visible_vram?.value || 0);
-    const mem_util = mem_total > 0 ? (mem_used / mem_total * 100) : 0;
-
-    return {
-      index: i,
-      name: d.asic?.market_name || 'AMD GPU',
-      driverVersion: d.driver?.version || 'N/A',
-      temperature: amdParseInt(gpu_data.temperature?.hotspot?.value || 0),
-      utilization: {
-        gpu: amdParseInt(gpu_data.usage?.gfx_activity?.value || 0),
-        memory: mem_util,
-      },
-      memory: { total: mem_total, used: mem_used, free: mem_free },
-      power: {
-        draw: amdParseFloat(gpu_data.power?.socket_power?.value || 0),
-        limit: amdParseFloat(d.limit?.max_power?.value || 0),
-      },
-      clocks: {
-        graphics: amdParseInt(gpu_data.clock?.gfx_0?.clk?.value || 0),
-        memory: amdParseInt(gpu_data.clock?.mem_0?.clk?.value || 0),
-      },
-      fan: { speed: amdParseFloat(gpu_data.fan?.usage?.value || 0) },
-    };
-  }).filter((g: any) => g.index !== undefined);
+  const gpus = Array.isArray(data) ? data : (data.gpu_devices || []);
+  
+  return gpus.map((gpu: any, index: number) => ({
+    index,
+    name: gpu.product_name || 'AMD GPU',
+    driverVersion: gpu.driver_version || 'N/A',
+    temperature: parseInt(gpu.temperature_edge || gpu.temperature_gpu || 0),
+    utilization: {
+      gpu: parseInt(gpu.gpu_util || 0),
+      memory: parseInt(gpu.vram_util || 0),
+    },
+    memory: {
+      total: parseFloat(gpu.vram_total || 0),
+      used: parseFloat(gpu.vram_used || 0),
+      free: parseFloat(gpu.vram_free || 0),
+    },
+    power: {
+      draw: parseFloat(gpu.power_current || 0),
+      limit: parseFloat(gpu.power_limit || 0),
+    },
+    clocks: {
+      graphics: parseInt(gpu.gfx_clock || 0),
+      memory: parseInt(gpu.mem_clock || 0),
+    },
+    fan: {
+      speed: parseFloat(gpu.fan_speed || 0),
+    },
+  })).filter((g: any) => g.index !== undefined);
 }
 
 async function getCpuStats() {
