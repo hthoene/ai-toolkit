@@ -33,6 +33,7 @@
     "systeminformation": "^5.27.11",
     "uuid": "^11.1.0",
     "yaml": "^2.7.0"
+    "systeminformation": "^5.22.0"
   },
   "devDependencies": {
     "@types/archiver": "^6.0.3",
