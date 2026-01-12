@@ -21,40 +21,50 @@ export async function GET() {
     const platform = os.platform();
     const isWindows = platform === 'win32';
 
-    // Check NVIDIA first
+    // 1) NVIDIA first
     const hasNvidiaSmi = await checkNvidiaSmi(isWindows);
     if (hasNvidiaSmi) {
       const gpuStats = await getGpuStats(isWindows);
       return NextResponse.json({
+        backend: 'nvidia',
         hasNvidiaSmi: true,
         hasAmdSmi: false,
         gpus: gpuStats,
       });
     }
 
-    // Fallback to AMD ROCm (prefer amd-smi)
+    // 2) AMD fallback
     const hasAmdSmi = await checkAmdSmi(isWindows);
     if (hasAmdSmi) {
       const gpuStats = await getAMDGpuStats(isWindows);
+
+      // IMPORTANT: UI shows "No NVIDIA GPUs..." when hasNvidiaSmi is false.
+      // So: if AMD GPUs exist, mark "hasNvidiaSmi" as true to keep UI working.
+      const hasAnyGpu = Array.isArray(gpuStats) && gpuStats.length > 0;
+
       return NextResponse.json({
-        hasNvidiaSmi: false,
+        backend: 'amd',
+        hasNvidiaSmi: hasAnyGpu, // <- UI-Compatibility
         hasAmdSmi: true,
         gpus: gpuStats,
       });
     }
 
-    // CPU fallback
+    // 3) CPU fallback
     const cpuStats = await getCpuStats();
     return NextResponse.json({
+      backend: 'cpu',
       hasNvidiaSmi: false,
       hasAmdSmi: false,
       gpus: [],
       cpu: cpuStats,
+      error: 'No supported GPU tool found (nvidia-smi/amd-smi).',
     });
   } catch (error) {
     console.error('Error fetching GPU stats:', error);
     return NextResponse.json(
       {
+        backend: 'error',
         hasNvidiaSmi: false,
         hasAmdSmi: false,
         gpus: [],
@@ -80,7 +90,6 @@ async function checkNvidiaSmi(isWindows: boolean): Promise<boolean> {
 
 async function checkAmdSmi(isWindows: boolean): Promise<boolean> {
   try {
-    // amd-smi is the tool that provides `static` and `metric` subcommands. [web:49]
     if (isWindows) {
       await execAsync('amd-smi version');
     } else {
@@ -135,10 +144,7 @@ async function getGpuStats(isWindows: boolean) {
 }
 
 async function getAMDGpuStats(isWindows: boolean) {
-  // IMPORTANT:
-  // - `amd-smi` supports `static` and `metric` subcommands (unlike `rocm-smi`). [web:49]
-  // - Output format can differ: sometimes object with gpu_data, sometimes arrays → handle both.
-
+  // amd-smi supports `static` + `metric` (rocm-smi does not). [web:49]
   const command = 'amd-smi static --json && echo ";" && amd-smi metric --json';
   const { stdout } = await execAsync(command, {
     env: { ...process.env, CUDA_DEVICE_ORDER: 'PCI_BUS_ID' },
@@ -157,16 +163,20 @@ async function getAMDGpuStats(isWindows: boolean) {
     return [];
   }
 
-  // Robust: accept either { gpu_data: [...] } or [...]
+  // Your output shows BOTH are arrays (good).
   const staticGpus: any[] = Array.isArray(sdata) ? sdata : Array.isArray(sdata?.gpu_data) ? sdata.gpu_data : [];
-  const metricGpus: any[] = Array.isArray(mdata) ? mdata : Array.isArray(mdata?.gpu_data) ? mdata.gpu_data : [];
+  const metricArr: any[] = Array.isArray(mdata) ? mdata : Array.isArray(mdata?.gpu_data) ? mdata.gpu_data : [];
+
+  // Build map gpuIndex -> metricObject (do NOT assume array index matches gpu id)
+  const metricByGpu = new Map<number, any>();
+  for (const m of metricArr) {
+    const gpuIndex = amdParseInt(m?.gpu);
+    metricByGpu.set(gpuIndex, m);
+  }
 
   const gpus = staticGpus.map(d => {
-    // GPU index comes as string often
     const i = amdParseInt(d?.gpu);
-
-    // metrics may be missing or index might be out of range
-    const gpu_data = metricGpus[i] || {};
+    const gpu_data = metricByGpu.get(i) || {};
 
     const mem_total = amdParseFloat(gpu_data?.mem_usage?.total_vram?.value);
     const mem_used = amdParseFloat(gpu_data?.mem_usage?.used_vram?.value);
